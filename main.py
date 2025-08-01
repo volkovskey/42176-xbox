@@ -21,7 +21,7 @@ from rich.panel import Panel
 
 # ---------- LOGGING ----------
 logger = logging.getLogger("movehub")
-logger.setLevel(logging.DEBUG)  # change to INFO to reduce verbosity
+logger.setLevel(logging.DEBUG)
 handler = logging.StreamHandler(sys.stdout)
 formatter = logging.Formatter("[%(asctime)s] %(levelname)-7s | %(message)s", datefmt="%H:%M:%S")
 handler.setFormatter(formatter)
@@ -32,10 +32,6 @@ logger.addHandler(handler)
 class TechnicMoveHub:
     SERVICE_UUID = "00001623-1212-EFDE-1623-785FEABCD123"
     CHAR_UUID = "00001624-1212-EFDE-1623-785FEABCD123"
-
-    LIGHTS_OFF_OFF = 0b100
-    LIGHTS_OFF_ON = 0b101
-    LIGHTS_ON_ON = 0b000
 
     SC_BUFFER_NO_FEEDBACK = 0x00
     MOTOR_MODE_POWER = 0x00
@@ -49,7 +45,7 @@ class TechnicMoveHub:
         self.device_name = device_name
         self.client: BleakClient | None = None
         self._start_time = None
-        self.simulate = SIMULATE_HUB  # use global flag
+        self.simulate = SIMULATE_HUB
 
     async def scan_and_connect(self) -> bool:
         if self.simulate:
@@ -127,7 +123,7 @@ class TechnicMoveHub:
         await asyncio.sleep(0.1)
 
     async def drive(self, speed=0, angle=0, lights=0x00):
-        logger.info(f"[command] drive speed={speed} angle={angle} lights={lights}")
+        logger.info(f"[command] drive speed={speed} angle={angle} lights=0x{lights:02x}")
         payload = bytearray([
             0x0d, 0x00, 0x81, 0x36, 0x11,
             0x51, 0x00, 0x03, 0x00,
@@ -136,9 +132,9 @@ class TechnicMoveHub:
         await self.send_data(payload)
 
 
-# ---------- Gamepad helpers ----------
+# ---------- Helpers ----------
 DEADZONE_STICK = 12
-DEADZONE_TRIGGER = 10
+DEADZONE_TRIGGER = 6
 
 def apply_deadzone(value, deadzone):
     return 0 if abs(value) < deadzone else value
@@ -146,24 +142,30 @@ def apply_deadzone(value, deadzone):
 def get_left_joystick(joystick):
     x = round(joystick.get_axis(0) * 100)
     y = -round(joystick.get_axis(1) * 100)
-    x = apply_deadzone(x, DEADZONE_STICK)
-    y = apply_deadzone(y, DEADZONE_STICK)
-    return x, y
+    return apply_deadzone(x, DEADZONE_STICK), apply_deadzone(y, DEADZONE_STICK)
 
 def get_right_joystick(joystick):
     x = round(joystick.get_axis(2) * 100)
     y = -round(joystick.get_axis(3) * 100)
-    x = apply_deadzone(x, DEADZONE_STICK)
-    y = apply_deadzone(y, DEADZONE_STICK)
-    return x, y
+    return apply_deadzone(x, DEADZONE_STICK), apply_deadzone(y, DEADZONE_STICK)
 
 def get_triggers(joystick):
-    # map axis in [-1,1] to [0,100]
     left_raw = (joystick.get_axis(4) * 100 + 100) / 2
     right_raw = (joystick.get_axis(5) * 100 + 100) / 2
     left = round(apply_deadzone(left_raw, DEADZONE_TRIGGER))
     right = round(apply_deadzone(right_raw, DEADZONE_TRIGGER))
     return left, right
+
+def compute_light_code(is_braking: bool, lights_enabled: bool) -> int:
+    # mapping:
+    # Front+back on: 0x00
+    # Front+back on braking: 0x01
+    # All off: 0x04
+    # Front off, back on braking: 0x05
+    if is_braking:
+        return 0x01 if lights_enabled else 0x05
+    else:
+        return 0x00 if lights_enabled else 0x04
 
 # Buttons mapping
 BUTTON_MAPPING = {
@@ -176,14 +178,13 @@ BUTTON_MAPPING = {
 }
 
 
-# ---------- Gear state (no reverse, no neutral) ----------
+# ---------- Gear state ----------
 class Gear(Enum):
     FIRST = auto()
     SECOND = auto()
     THIRD = auto()
 
 GEAR_ORDER = [Gear.FIRST, Gear.SECOND, Gear.THIRD]
-
 GEAR_THROTTLE_SCALE = {
     Gear.FIRST: 0.25,
     Gear.SECOND: 0.5,
@@ -199,7 +200,7 @@ def gear_name(g: Gear):
 
 
 # ---------- UI / Status Table ----------
-def build_status_table(raw, command, connected, simulate, lights, brake, gear):
+def build_status_table(raw, command, connected, simulate, lights_enabled, brake, gear, lights_code):
     table = Table(expand=True)
     table.add_column("Category", no_wrap=True)
     table.add_column("Value", overflow="fold")
@@ -214,10 +215,10 @@ def build_status_table(raw, command, connected, simulate, lights, brake, gear):
     table.add_row("Triggers", triggers)
     table.add_row("Buttons", buttons if buttons else "(none)")
 
-    cmd = f"raw_throttle={command['raw_throttle']} adjusted_speed={command['speed']} angle={command['angle']} lights={command['lights']}"
+    cmd = f"raw_throttle={command['raw_throttle']} adjusted_speed={command['speed']} angle={command['angle']} lights_code=0x{lights_code:02x}"
     table.add_row("Drive Command", cmd)
     table.add_row("Brake Active", str(bool(brake)))
-    table.add_row("Lights Mode", "ON" if lights == TechnicMoveHub.LIGHTS_ON_ON else "OFF" if lights == TechnicMoveHub.LIGHTS_OFF_OFF else hex(lights))
+    table.add_row("Lights Enabled", "ON" if lights_enabled else "OFF")
     table.add_row("Current Gear", gear_name(gear))
     conn = "SIMULATED" if simulate else ("Connected" if connected else "Disconnected")
     table.add_row("Hub Status", conn)
@@ -252,17 +253,17 @@ async def main():
     await hub.calibrate_steering()
 
     # initial state
-    lights = hub.LIGHTS_ON_ON
+    lights_enabled = True
     toggle_old = False
     gear_idx = 0
     current_gear = GEAR_ORDER[gear_idx]
 
     throttle_old = 0
     steering_old = 0
-    lights_old = lights
+    lights_old_code = compute_light_code(False, lights_enabled)
     was_brake = False
 
-    polling_interval = 0.05  # seconds
+    polling_interval = 0.01  # seconds
 
     raw = {
         "left": (0, 0),
@@ -270,7 +271,7 @@ async def main():
         "triggers": (0, 0),
         "buttons": {name: 0 for name in BUTTON_MAPPING},
     }
-    command = {"speed": 0, "angle": 0, "lights": lights, "raw_throttle": 0}
+    command = {"speed": 0, "angle": 0, "raw_throttle": 0}
 
     with Live(refresh_per_second=10, transient=False) as live:
         try:
@@ -282,18 +283,10 @@ async def main():
                 left_trigger, right_trigger = get_triggers(joystick)
                 button_states = {name: func(joystick) for name, func in BUTTON_MAPPING.items()}
 
-                # exit if both sticks pushed near extremes simultaneously
-                left_stick_full = abs(left_x) >= (100 - DEADZONE_STICK) or abs(left_y) >= (100 - DEADZONE_STICK)
-                right_stick_full = abs(right_x) >= (100 - DEADZONE_STICK) or abs(right_y) >= (100 - DEADZONE_STICK)
-                if left_stick_full and right_stick_full:
-                    logger.info("Both sticks fully engaged simultaneously; exiting program.")
-                    break
-
-                # gear shifting: LB = down, RB = up within bounds
+                # gear shifting: LB = down, RB = up
                 if button_states["LB"] and not raw["buttons"].get("LB", 0):
                     gear_idx = max(0, gear_idx - 1)
                     current_gear = GEAR_ORDER[gear_idx]
-                    # vibration feedback per gear
                     if current_gear == Gear.FIRST:
                         joystick.rumble(0.1, 0.1, 150)
                     elif current_gear == Gear.SECOND:
@@ -317,15 +310,12 @@ async def main():
                 raw_throttle = 0
 
                 if right_trigger > 0:
-                    # gas pressed: left trigger subtracts (brake); full brake if left >80 or A pressed
                     if left_trigger > 80 or button_states["A"]:
                         full_brake = True
                         raw_throttle = 0
                     else:
                         raw_throttle = right_trigger - left_trigger
                 else:
-                    # no gas: left trigger acts as backward up to 40%; 
-                    # brake ONLY by button A (left_trigger >80 більше не гальмує)
                     if button_states["A"]:
                         full_brake = True
                         raw_throttle = 0
@@ -339,38 +329,37 @@ async def main():
                 else:
                     adjusted_speed = int(raw_throttle * scale)
 
-                steering = left_x  # steering from left stick X
+                steering = left_x
 
-                # lights toggle on Y press (independent of direction)
+                # lights toggle on Y press
                 toggle = button_states["Y"]
                 if toggle and not toggle_old:
-                    if lights == hub.LIGHTS_OFF_OFF:
-                        lights = hub.LIGHTS_ON_ON
-                        logger.info("Lights turned ON")
-                    else:
-                        lights = hub.LIGHTS_OFF_OFF
-                        logger.info("Lights turned OFF")
+                    lights_enabled = not lights_enabled
+                    logger.info(f"Lights {'ON' if lights_enabled else 'OFF'}")
                 toggle_old = toggle
 
                 brake_active = full_brake
 
+                # compute light code based on braking and lights_enabled
+                lights_code = compute_light_code(brake_active, lights_enabled)
+
                 # drive command logic
                 if brake_active and not was_brake:
-                    await hub.drive(0, steering, hub.LIGHTS_OFF_ON)
+                    await hub.drive(0, steering, lights_code)
                     throttle_old = 0
 
                 if not brake_active and was_brake:
-                    await hub.drive(adjusted_speed, steering, lights)
+                    await hub.drive(adjusted_speed, steering, lights_code)
 
                 should_drive = (
-                    (steering != steering_old or adjusted_speed != throttle_old or lights != lights_old)
+                    (steering != steering_old or adjusted_speed != throttle_old or lights_code != lights_old_code)
                 )
                 if should_drive:
-                    await hub.drive(adjusted_speed, steering, lights)
+                    await hub.drive(adjusted_speed, steering, lights_code)
 
                 throttle_old = adjusted_speed
                 steering_old = steering
-                lights_old = lights
+                lights_old_code = lights_code
                 was_brake = brake_active
 
                 # update raw and command for UI
@@ -382,7 +371,6 @@ async def main():
                 command["raw_throttle"] = raw_throttle
                 command["speed"] = adjusted_speed
                 command["angle"] = steering
-                command["lights"] = lights
 
                 # build and refresh status table
                 table = build_status_table(
@@ -390,9 +378,10 @@ async def main():
                     command=command,
                     connected=bool(hub.client and getattr(hub.client, "is_connected", False)),
                     simulate=hub.simulate,
-                    lights=lights,
+                    lights_enabled=lights_enabled,
                     brake=brake_active,
                     gear=current_gear,
+                    lights_code=lights_code,
                 )
                 live.update(Panel(table, title="Gamepad → Vehicle", border_style="green"))
 
