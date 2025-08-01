@@ -94,6 +94,28 @@
       color: #fff;
     }
 
+    .mode-badge {
+      margin-top: 8px;
+      padding: 6px 14px;
+      border-radius: 20px;
+      display: inline-block;
+      font-weight: 600;
+      background: #222;
+      color: #aaa;
+    }
+
+    .mode-badge.sport {
+      background: #f08c3c;
+      color: #fff;
+      box-shadow: 0 0 14px rgba(240, 140, 60, 0.7);
+    }
+
+    .mode-badge.comfort {
+      background: #10c0a3;
+      color: #fff;
+      box-shadow: 0 0 14px rgba(16, 192, 163, 0.7);
+    }
+
     .button {
       position: relative;
       width: 60px;
@@ -246,6 +268,7 @@
           <div class="power-value" id="power-value">0%</div>
           <div class="power-label">Power</div>
           <div class="small" id="avg-power">1m avg: 0%</div>
+          <div id="mode-badge" class="mode-badge comfort">Comfort</div>
         </div>
       </div>
 
@@ -382,9 +405,15 @@
       const instant = t.instant_power;
       const avg = t.avg_power;
 
-      // Dial
+      // Power dial
       drawPowerDial(smoothed);
       document.getElementById('avg-power').innerText = `1m avg: ${avg.toFixed(1)}%`;
+
+      // Mode badge
+      const modeBadge = document.getElementById('mode-badge');
+      modeBadge.innerText = t.mode;
+      modeBadge.classList.toggle('sport', t.mode === 'Sport');
+      modeBadge.classList.toggle('comfort', t.mode === 'Comfort');
 
       // Gear
       document.getElementById('gear-1').classList.toggle('active', t.gear === '1st');
@@ -419,7 +448,7 @@
       document.getElementById('btn-LB').classList.toggle('active', !!t.buttons.LB);
       document.getElementById('btn-RB').classList.toggle('active', !!t.buttons.RB);
 
-      // Triggers bars
+      // Trigger fills
       document.getElementById('gas-fill').style.width = `${Math.max(0, t.raw_right_trigger)}%`;
       document.getElementById('lt-fill').style.width = `${Math.max(0, t.raw_left_trigger)}%`;
     };

@@ -46,7 +46,7 @@ async def telemetry_ws(websocket: WebSocket):
     clients.add(websocket)
     try:
         while True:
-            await asyncio.sleep(1)  # keep connection open; telemetry pushed externally
+            await asyncio.sleep(1)
     except Exception:
         pass
     finally:
@@ -68,10 +68,6 @@ async def broadcast_telemetry(data: dict):
 class TechnicMoveHub:
     SERVICE_UUID = "00001623-1212-EFDE-1623-785FEABCD123"
     CHAR_UUID = "00001624-1212-EFDE-1623-785FEABCD123"
-
-    LIGHTS_OFF_OFF = 0b100  # legacy, not used directly
-    LIGHTS_OFF_ON = 0b101
-    LIGHTS_ON_ON = 0b000
 
     def __init__(self, device_name: str):
         self.device_name = device_name
@@ -188,7 +184,7 @@ def compute_light_code(is_braking: bool, lights_enabled: bool) -> int:
 BUTTON_MAPPING = {
     "A": lambda j: j.get_button(0),  # full brake
     "B": lambda j: j.get_button(1),
-    "X": lambda j: j.get_button(2),
+    "X": lambda j: j.get_button(2),  # mode toggle
     "Y": lambda j: j.get_button(3),  # lights toggle
     "LB": lambda j: j.get_button(4),  # gear down
     "RB": lambda j: j.get_button(5),  # gear up
@@ -217,7 +213,8 @@ def gear_name(g: Gear):
 
 
 # ---------- UI / Status Table ----------
-def build_status_table(raw, command, connected, simulate, lights_enabled, brake, gear, lights_code, power_sent, instant_power, avg_power):
+def build_status_table(raw, command, connected, simulate, lights_enabled, brake, gear, lights_code,
+                       power_sent, instant_power, avg_power, mode):
     table = Table(expand=True)
     table.add_column("Category", no_wrap=True)
     table.add_column("Value", overflow="fold")
@@ -239,6 +236,7 @@ def build_status_table(raw, command, connected, simulate, lights_enabled, brake,
     table.add_row("Brake Active", str(bool(brake)))
     table.add_row("Lights Enabled", "ON" if lights_enabled else "OFF")
     table.add_row("Current Gear", gear_name(gear))
+    table.add_row("Mode", mode)
     conn = "SIMULATED" if simulate else ("Connected" if connected else "Disconnected")
     table.add_row("Hub Status", conn)
     return table
@@ -279,8 +277,14 @@ async def controller_loop():
     lights_old_code = compute_light_code(False, lights_enabled)
     was_brake = False
 
+    # mode state: Comfort (smoother) vs Sport (sharper)
+    mode = "Comfort"
+    x_old = 0
+
     # smoothing & averaging setup
-    SMOOTH_ALPHA = 0.15  # exponential smoothing factor for sending power
+    COMFORT_ALPHA = 0.08
+    SPORT_ALPHA = 0.25
+    SMOOTH_ALPHA = COMFORT_ALPHA  # start in comfort
     smoothed_power = 0.0
     window = deque()
     WINDOW_SECONDS = 60.0
@@ -307,6 +311,17 @@ async def controller_loop():
             right_x, right_y = get_right_joystick(joystick)
             left_trigger, right_trigger = get_triggers(joystick)
             button_states = {name: func(joystick) for name, func in BUTTON_MAPPING.items()}
+
+            # mode toggle on X rising edge
+            if button_states["X"] and not raw["buttons"].get("X", 0):
+                if mode == "Comfort":
+                    mode = "Sport"
+                    SMOOTH_ALPHA = SPORT_ALPHA
+                    logger.info("Switched to Sport mode")
+                else:
+                    mode = "Comfort"
+                    SMOOTH_ALPHA = COMFORT_ALPHA
+                    logger.info("Switched to Comfort mode")
 
             # gear shifting
             if button_states["LB"] and not raw["buttons"].get("LB", 0):
@@ -355,11 +370,11 @@ async def controller_loop():
 
             steering = left_x
 
-            # apply exponential smoothing for output power
+            # apply exponential smoothing based on mode
             smoothed_power = SMOOTH_ALPHA * adjusted_speed + (1 - SMOOTH_ALPHA) * smoothed_power
             power_to_send = int(smoothed_power)
 
-            # maintain 1-minute sliding window average of smoothed_power
+            # sliding window 1-minute average of smoothed power
             now = time.time()
             window.append((now, smoothed_power))
             while window and now - window[0][0] > WINDOW_SECONDS:
@@ -397,10 +412,10 @@ async def controller_loop():
             raw["triggers"] = (left_trigger, right_trigger)
             raw["buttons"] = {k: int(v) for k, v in button_states.items()}
             command["raw_throttle"] = raw_throttle
-            command["speed"] = power_to_send  # now reflects smoothed power
+            command["speed"] = power_to_send
             command["angle"] = steering
 
-            # build and show table
+            # build and render table
             table = build_status_table(
                 raw=raw,
                 command=command,
@@ -413,18 +428,20 @@ async def controller_loop():
                 power_sent=power_to_send,
                 instant_power=adjusted_speed,
                 avg_power=avg_power,
+                mode=mode,
             )
             if ENABLE_RICH_LOG:
                 live_ctx.update(Panel(table, title="Gamepad → Vehicle", border_style="green"))
             else:
-                logger.info(f"Gear: {gear_name(current_gear)} | Power sent: {power_to_send} | Avg1m: {avg_power:.1f} | Brake: {brake_active}")
+                logger.info(f"Gear: {gear_name(current_gear)} | Mode: {mode} | Power sent: {power_to_send} | Avg1m: {avg_power:.1f} | Brake: {brake_active}")
 
             # telemetry broadcast
             telemetry = {
-                "power": power_to_send,             # smoothed (sent) power
-                "instant_power": adjusted_speed,    # raw before smoothing
-                "avg_power": avg_power,             # 1-minute average
+                "power": power_to_send,
+                "instant_power": adjusted_speed,
+                "avg_power": avg_power,
                 "gear": gear_name(current_gear),
+                "mode": mode,
                 "raw_left_trigger": left_trigger,
                 "raw_right_trigger": right_trigger,
                 "angle": steering,
