@@ -94,12 +94,6 @@
       color: #fff;
     }
 
-    .buttons-grid {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 8px;
-    }
-
     .button {
       position: relative;
       width: 60px;
@@ -141,8 +135,8 @@
 
     .power-container {
       position: relative;
-      width: 320px;
-      height: 320px;
+      width: 500px;
+      height: 500px;
     }
 
     .dial {
@@ -245,12 +239,13 @@
     </div>
 
     <div class="center">
-      <div class="power-container card" style="width:500px; height:500px;">
+      <div class="power-container card">
         <canvas id="dial-bg" class="dial" width="500" height="500"></canvas>
         <canvas id="dial-fg" class="dial" width="500" height="500"></canvas>
         <div class="power-center">
           <div class="power-value" id="power-value">0%</div>
           <div class="power-label">Power</div>
+          <div class="small" id="avg-power">1m avg: 0%</div>
         </div>
       </div>
 
@@ -278,7 +273,6 @@
     <div class="side">
       <div class="card">
         <div class="label">Buttons</div>
-        <!-- Layout approximating Xbox: Y above, A below-right, B right, X left -->
         <div style="display:flex; justify-content:center; position:relative; height:140px; margin-top:4px;">
           <div style="position:absolute; top:0; left:50%; transform:translateX(-50%);">
             <div class="button" id="btn-Y">Y</div>
@@ -333,13 +327,11 @@
       bgCtx.clearRect(0, 0, size, size);
       bgCtx.save();
       bgCtx.translate(center, center);
-      // arc background
       bgCtx.lineWidth = 18;
       bgCtx.strokeStyle = "#2f2f60";
       bgCtx.beginPath();
       bgCtx.arc(0, 0, radius, Math.PI * 0.75, Math.PI * 2.25, false);
       bgCtx.stroke();
-      // ticks
       for (let i = 0; i <= 10; i++) {
         const angle = Math.PI * 0.75 + (i / 10) * (Math.PI * 1.5);
         const inner = radius - 15;
@@ -360,7 +352,6 @@
       fgCtx.translate(center, center);
       const span = Math.PI * 1.5;
       const mid = Math.PI * 0.75 + span / 2;
-      // draw filled arc
       if (value >= 0) {
         const frac = Math.min(value, 100) / 100;
         fgCtx.strokeStyle = "#10c0a3";
@@ -387,38 +378,40 @@
     let ws = new WebSocket(`ws://${location.host}/ws/telemetry`);
     ws.onmessage = (ev) => {
       const t = JSON.parse(ev.data);
-      const power = t.power; // renamed from speed
+      const smoothed = t.power;
+      const instant = t.instant_power;
+      const avg = t.avg_power;
 
-      // Power (gauge)
-      drawPowerDial(power);
+      // Dial
+      drawPowerDial(smoothed);
+      document.getElementById('avg-power').innerText = `1m avg: ${avg.toFixed(1)}%`;
 
       // Gear
       document.getElementById('gear-1').classList.toggle('active', t.gear === '1st');
       document.getElementById('gear-2').classList.toggle('active', t.gear === '2nd');
       document.getElementById('gear-3').classList.toggle('active', t.gear === '3rd');
 
-      // Brake bar: full brake = 100%
+      // Brake bar
       document.getElementById('brake-fill').style.width = t.brake ? '100%' : '0%';
       document.getElementById('brake-text').innerText = t.brake;
 
-      // Lights: compute front/back from lights + brake logic
-      // lights boolean + t.brake determines code: frontend only shows bulbs
+      // Lights
       const lightsEnabled = t.lights;
-      // if braking and lightsEnabled => front+back on; if braking and !lightsEnabled => back on; if not braking and lightsEnabled => both on; else off
       const frontOn = lightsEnabled;
       const backOn = t.brake ? true : lightsEnabled;
       document.getElementById('light-front').classList.toggle('on', frontOn);
       document.getElementById('light-back').classList.toggle('on', backOn);
       document.getElementById('lights-text').innerText = lightsEnabled ? 'ON' : 'OFF';
 
-      // Raw command
-      document.getElementById('raw').innerText = `throttle=${t.raw_right_trigger} power=${t.power} angle=${t.angle}`;
+      // Raw
+      document.getElementById('raw').innerText =
+        `instant=${instant.toFixed(1)} smoothed=${smoothed.toFixed(1)} angle=${t.angle}`;
 
       // Throttle / angle
       document.getElementById('throttle').innerText = t.raw_right_trigger;
       document.getElementById('angle').innerText = t.angle;
 
-      // Buttons (A,B,X,Y layout)
+      // Buttons
       document.getElementById('btn-A').classList.toggle('active', !!t.buttons.A);
       document.getElementById('btn-B').classList.toggle('active', !!t.buttons.B);
       document.getElementById('btn-X').classList.toggle('active', !!t.buttons.X);
@@ -426,10 +419,9 @@
       document.getElementById('btn-LB').classList.toggle('active', !!t.buttons.LB);
       document.getElementById('btn-RB').classList.toggle('active', !!t.buttons.RB);
 
-      // Triggers
-      const gasPercent = Math.max(0, t.buttons ? 0 : 0); // placeholder if needed
-      document.getElementById('gas-fill').style.width = `${Math.max(0, t.raw_right_trigger > 0 ? t.raw_right_trigger : 0)}%`;
-      document.getElementById('lt-fill').style.width = `${Math.max(0, t.raw_left_trigger > 0 ? t.raw_left_trigger : 0)}%`;
+      // Triggers bars
+      document.getElementById('gas-fill').style.width = `${Math.max(0, t.raw_right_trigger)}%`;
+      document.getElementById('lt-fill').style.width = `${Math.max(0, t.raw_left_trigger)}%`;
     };
     ws.onopen = () => console.log("Telemetry connected");
     ws.onclose = () => console.log("Telemetry disconnected");

@@ -4,6 +4,7 @@ import asyncio
 import time
 import logging
 from enum import Enum, auto
+from collections import deque
 import json
 
 SIMULATE_HUB = True  # when True: skip real hub connection, just simulate
@@ -145,7 +146,7 @@ class TechnicMoveHub:
         await asyncio.sleep(0.1)
 
     async def drive(self, speed=0, angle=0, lights=0x00):
-        logger.info(f"[command] drive speed={speed} angle={angle} lights=0x{lights:02x}")
+        logger.info(f"[command] drive power={speed} angle={angle} lights=0x{lights:02x}")
         payload = bytearray([
             0x0d, 0x00, 0x81, 0x36, 0x11,
             0x51, 0x00, 0x03, 0x00,
@@ -216,7 +217,7 @@ def gear_name(g: Gear):
 
 
 # ---------- UI / Status Table ----------
-def build_status_table(raw, command, connected, simulate, lights_enabled, brake, gear, lights_code):
+def build_status_table(raw, command, connected, simulate, lights_enabled, brake, gear, lights_code, power_sent, instant_power, avg_power):
     table = Table(expand=True)
     table.add_column("Category", no_wrap=True)
     table.add_column("Value", overflow="fold")
@@ -231,8 +232,10 @@ def build_status_table(raw, command, connected, simulate, lights_enabled, brake,
     table.add_row("Triggers", triggers)
     table.add_row("Buttons", buttons if buttons else "(none)")
 
-    cmd = f"raw_throttle={command['raw_throttle']} adjusted_speed={command['speed']} angle={command['angle']} lights_code=0x{lights_code:02x}"
+    cmd = f"instant={instant_power:.1f} smoothed={power_sent} angle={command['angle']} lights_code=0x{lights_code:02x}"
     table.add_row("Drive Command", cmd)
+    table.add_row("Power Sent", str(power_sent))
+    table.add_row("1m Avg Power", f"{avg_power:.1f}")
     table.add_row("Brake Active", str(bool(brake)))
     table.add_row("Lights Enabled", "ON" if lights_enabled else "OFF")
     table.add_row("Current Gear", gear_name(gear))
@@ -275,6 +278,12 @@ async def controller_loop():
     steering_old = 0
     lights_old_code = compute_light_code(False, lights_enabled)
     was_brake = False
+
+    # smoothing & averaging setup
+    SMOOTH_ALPHA = 0.15  # exponential smoothing factor for sending power
+    smoothed_power = 0.0
+    window = deque()
+    WINDOW_SECONDS = 60.0
 
     polling_interval = 0.01  # seconds
 
@@ -346,6 +355,17 @@ async def controller_loop():
 
             steering = left_x
 
+            # apply exponential smoothing for output power
+            smoothed_power = SMOOTH_ALPHA * adjusted_speed + (1 - SMOOTH_ALPHA) * smoothed_power
+            power_to_send = int(smoothed_power)
+
+            # maintain 1-minute sliding window average of smoothed_power
+            now = time.time()
+            window.append((now, smoothed_power))
+            while window and now - window[0][0] > WINDOW_SECONDS:
+                window.popleft()
+            avg_power = sum(p for _, p in window) / len(window) if window else 0.0
+
             # lights toggle
             toggle = button_states["Y"]
             if toggle and not toggle_old:
@@ -356,17 +376,17 @@ async def controller_loop():
             brake_active = full_brake
             lights_code = compute_light_code(brake_active, lights_enabled)
 
-            # drive logic
+            # drive logic using smoothed power
             if brake_active and not was_brake:
                 await hub.drive(0, steering, lights_code)
                 throttle_old = 0
             if not brake_active and was_brake:
-                await hub.drive(adjusted_speed, steering, lights_code)
-            should_drive = (steering != steering_old or adjusted_speed != throttle_old or lights_code != lights_old_code)
+                await hub.drive(power_to_send, steering, lights_code)
+            should_drive = (steering != steering_old or power_to_send != throttle_old or lights_code != lights_old_code)
             if should_drive:
-                await hub.drive(adjusted_speed, steering, lights_code)
+                await hub.drive(power_to_send, steering, lights_code)
 
-            throttle_old = adjusted_speed
+            throttle_old = power_to_send
             steering_old = steering
             lights_old_code = lights_code
             was_brake = brake_active
@@ -377,10 +397,10 @@ async def controller_loop():
             raw["triggers"] = (left_trigger, right_trigger)
             raw["buttons"] = {k: int(v) for k, v in button_states.items()}
             command["raw_throttle"] = raw_throttle
-            command["speed"] = adjusted_speed
+            command["speed"] = power_to_send  # now reflects smoothed power
             command["angle"] = steering
 
-            # build table
+            # build and show table
             table = build_status_table(
                 raw=raw,
                 command=command,
@@ -390,15 +410,20 @@ async def controller_loop():
                 brake=brake_active,
                 gear=current_gear,
                 lights_code=lights_code,
+                power_sent=power_to_send,
+                instant_power=adjusted_speed,
+                avg_power=avg_power,
             )
             if ENABLE_RICH_LOG:
                 live_ctx.update(Panel(table, title="Gamepad → Vehicle", border_style="green"))
             else:
-                logger.info(f"Gear: {gear_name(current_gear)} | Speed: {adjusted_speed} | Brake: {brake_active} | Lights: {'ON' if lights_enabled else 'OFF'}")
+                logger.info(f"Gear: {gear_name(current_gear)} | Power sent: {power_to_send} | Avg1m: {avg_power:.1f} | Brake: {brake_active}")
 
-            # telemetry broadcast (fire-and-forget)
+            # telemetry broadcast
             telemetry = {
-                "power": adjusted_speed,
+                "power": power_to_send,             # smoothed (sent) power
+                "instant_power": adjusted_speed,    # raw before smoothing
+                "avg_power": avg_power,             # 1-minute average
                 "gear": gear_name(current_gear),
                 "raw_left_trigger": left_trigger,
                 "raw_right_trigger": right_trigger,
@@ -406,9 +431,8 @@ async def controller_loop():
                 "brake": brake_active,
                 "lights": lights_enabled,
                 "buttons": raw["buttons"],
-                "timestamp": time.time(),
+                "timestamp": now,
             }
-
             asyncio.create_task(broadcast_telemetry(telemetry))
 
             await asyncio.sleep(polling_interval)
@@ -424,23 +448,17 @@ async def controller_loop():
 
 
 async def main():
-    # prepare hub/controller task
     controller = asyncio.create_task(controller_loop())
-
-    # configure uvicorn server without blocking
     config = Config(
         app=app,
         host="0.0.0.0",
         port=8000,
         log_level="warning",
         loop="asyncio",
-        lifespan="off"  # optional: disable lifespan if not needed
+        lifespan="off"
     )
     server = Server(config)
-
-    # run both concurrently
     web = asyncio.create_task(server.serve())
-
     await asyncio.gather(controller, web)
 
 
