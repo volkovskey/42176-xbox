@@ -1,0 +1,439 @@
+<!doctype html>
+<html>
+
+<head>
+  <meta charset="utf-8" />
+  <title>Move Hub Dashboard (42176)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    :root {
+      --bg: #0f1025;
+      --card: #1f2045;
+      --radius: 12px;
+      --accent: #10c0a3;
+      --muted: #666;
+      --text: #eef0fa;
+      --warn: #f08c3c;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      margin: 0;
+      padding: 0;
+      font-family: system-ui, -apple-system, BlinkMacSystemFont, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      display: flex;
+      min-height: 100vh;
+    }
+
+    .container {
+      flex: 1;
+      display: flex;
+      padding: 20px;
+      gap: 20px;
+    }
+
+    .side {
+      flex: 1;
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      max-width: 280px;
+    }
+
+    .center {
+      flex: 2;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .card {
+      background: var(--card);
+      border-radius: var(--radius);
+      padding: 16px;
+      position: relative;
+      box-shadow: 0 15px 40px rgba(0, 0, 0, 0.4);
+    }
+
+    .label {
+      font-size: 0.65rem;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      margin-bottom: 6px;
+      color: var(--muted);
+    }
+
+    .gear-display {
+      display: flex;
+      gap: 8px;
+      justify-content: center;
+      margin-top: 6px;
+    }
+
+    .gear-slot {
+      width: 60px;
+      height: 40px;
+      border-radius: 8px;
+      background: #222;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      position: relative;
+    }
+
+    .gear-slot.active {
+      background: var(--accent);
+      box-shadow: 0 0 18px rgba(16, 192, 163, 0.6);
+      color: #fff;
+    }
+
+    .buttons-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 8px;
+    }
+
+    .button {
+      position: relative;
+      width: 60px;
+      height: 60px;
+      border-radius: 50%;
+      background: #222;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 600;
+      font-size: 0.9rem;
+      color: #ccc;
+      box-shadow: 0 5px 20px rgba(0, 0, 0, 0.5);
+      transition: all .15s ease;
+    }
+
+    .button.active {
+      background: var(--accent);
+      color: #fff;
+      box-shadow: 0 0 20px rgba(16, 192, 163, 0.9);
+    }
+
+    .trigger-bar,
+    .brake-bar {
+      width: 100%;
+      height: 12px;
+      background: #222;
+      border-radius: 6px;
+      overflow: hidden;
+      position: relative;
+      margin-top: 4px;
+    }
+
+    .trigger-fill,
+    .brake-fill {
+      height: 100%;
+      transition: width .1s ease;
+    }
+
+    .power-container {
+      position: relative;
+      width: 320px;
+      height: 320px;
+    }
+
+    .dial {
+      position: absolute;
+      inset: 0;
+    }
+
+    .power-center {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      text-align: center;
+    }
+
+    .power-value {
+      font-size: 3.2rem;
+      font-weight: 700;
+    }
+
+    .power-label {
+      font-size: 0.9rem;
+      margin-top: 4px;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      color: #aaa;
+    }
+
+    .lights {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .light-bulb {
+      width: 50px;
+      height: 50px;
+      border-radius: 50%;
+      background: #222;
+      position: relative;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+    }
+
+    .light-bulb.on.front::after {
+      content: '';
+      position: absolute;
+      inset: 8px;
+      border-radius: 50%;
+      box-shadow: 0 0 20px rgba(255, 255, 180, 0.9);
+      background: radial-gradient(circle at 30% 30%, rgba(255, 255, 200, 0.9) 0%, rgba(255, 255, 150, 0.3) 60%);
+    }
+
+    .light-bulb.on.back::after {
+      content: '';
+      position: absolute;
+      inset: 8px;
+      border-radius: 50%;
+      box-shadow: 0 0 18px rgba(255, 120, 120, 0.9);
+      background: radial-gradient(circle at 50% 50%, rgba(255, 100, 100, 0.9) 0%, rgba(200, 50, 50, 0.3) 60%);
+    }
+
+    .status-row {
+      display: flex;
+      gap: 12px;
+      margin-top: 6px;
+      flex-wrap: wrap;
+    }
+
+    .small {
+      font-size: 0.75rem;
+      color: #aaa;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container">
+    <div class="side">
+      <div class="card">
+        <div class="label">Raw Command</div>
+        <div id="raw" class="small">-</div>
+        <div class="status-row">
+          <div><strong>Throttle:</strong> <span id="throttle">0</span></div>
+          <div><strong>Angle:</strong> <span id="angle">0</span></div>
+          <div><strong>Brake:</strong> <span id="brake-text">false</span></div>
+          <div><strong>Lights:</strong> <span id="lights-text">ON</span></div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="label">Brake</div>
+        <div class="brake-bar">
+          <div class="brake-fill" id="brake-fill" style="width:0%; background: #f08c3c;"></div>
+        </div>
+        <div class="small">Button A / full brake</div>
+      </div>
+    </div>
+
+    <div class="center">
+      <div class="power-container card" style="width:500px; height:500px;">
+        <canvas id="dial-bg" class="dial" width="500" height="500"></canvas>
+        <canvas id="dial-fg" class="dial" width="500" height="500"></canvas>
+        <div class="power-center">
+          <div class="power-value" id="power-value">0%</div>
+          <div class="power-label">Power</div>
+        </div>
+      </div>
+
+      <div style="display: flex; justify-content: center; gap: 20px; margin-top: 12px;">
+        <div class="card">
+          <div class="label">Lights</div>
+          <div class="lights">
+            <div class="light-bulb front" id="light-front"></div>
+            <div class="light-bulb back" id="light-back"></div>
+          </div>
+          <div class="small">Front & back / braking state</div>
+        </div>
+
+        <div class="card">
+          <div class="label">Gear</div>
+          <div class="gear-display">
+            <div class="gear-slot" id="gear-1">1st</div>
+            <div class="gear-slot" id="gear-2">2nd</div>
+            <div class="gear-slot" id="gear-3">3rd</div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="side">
+      <div class="card">
+        <div class="label">Buttons</div>
+        <!-- Layout approximating Xbox: Y above, A below-right, B right, X left -->
+        <div style="display:flex; justify-content:center; position:relative; height:140px; margin-top:4px;">
+          <div style="position:absolute; top:0; left:50%; transform:translateX(-50%);">
+            <div class="button" id="btn-Y">Y</div>
+          </div>
+          <div style="position:absolute; bottom:0; left:50%; transform:translateX(-50%);">
+            <div class="button" id="btn-A">A</div>
+          </div>
+          <div style="position:absolute; left:0; top:50%; transform:translateY(-50%);">
+            <div class="button" id="btn-X">X</div>
+          </div>
+          <div style="position:absolute; right:0; top:50%; transform:translateY(-50%);">
+            <div class="button" id="btn-B">B</div>
+          </div>
+        </div>
+        <div style="margin-top:8px;">
+          <div class="label">Bumpers / Shifts</div>
+          <div style="display:flex; gap:8px; margin-top:4px;">
+            <div class="button" style="border-radius:8px;" id="btn-LB">LB</div>
+            <div class="button" style="border-radius:8px;" id="btn-RB">RB</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="label">Gamepad Triggers</div>
+        <div class="small">Right trigger = forward power; Left trigger = brake / reverse</div>
+        <div style="margin-top:6px;">
+          <div class="label">Right Trigger (gas)</div>
+          <div class="trigger-bar">
+            <div class="trigger-fill" id="gas-fill" style="width:0%; background: #10c0a3;"></div>
+          </div>
+          <div class="label" style="margin-top:6px;">Left Trigger (brake/reverse)</div>
+          <div class="trigger-bar">
+            <div class="trigger-fill" id="lt-fill" style="width:0%; background: #f08c3c;"></div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    // dial drawing helpers
+    const bgCanvas = document.getElementById('dial-bg');
+    const fgCanvas = document.getElementById('dial-fg');
+    const bgCtx = bgCanvas.getContext('2d');
+    const fgCtx = fgCanvas.getContext('2d');
+    const size = bgCanvas.width;
+    const center = size / 2;
+    const radius = center * 0.85;
+
+    function drawBackground() {
+      bgCtx.clearRect(0, 0, size, size);
+      bgCtx.save();
+      bgCtx.translate(center, center);
+      // arc background
+      bgCtx.lineWidth = 18;
+      bgCtx.strokeStyle = "#2f2f60";
+      bgCtx.beginPath();
+      bgCtx.arc(0, 0, radius, Math.PI * 0.75, Math.PI * 2.25, false);
+      bgCtx.stroke();
+      // ticks
+      for (let i = 0; i <= 10; i++) {
+        const angle = Math.PI * 0.75 + (i / 10) * (Math.PI * 1.5);
+        const inner = radius - 15;
+        const outer = radius;
+        bgCtx.lineWidth = 3;
+        bgCtx.strokeStyle = "#444";
+        bgCtx.beginPath();
+        bgCtx.moveTo(Math.cos(angle) * inner, Math.sin(angle) * inner);
+        bgCtx.lineTo(Math.cos(angle) * outer, Math.sin(angle) * outer);
+        bgCtx.stroke();
+      }
+      bgCtx.restore();
+    }
+
+    function drawPowerDial(value) {
+      fgCtx.clearRect(0, 0, size, size);
+      fgCtx.save();
+      fgCtx.translate(center, center);
+      const span = Math.PI * 1.5;
+      const mid = Math.PI * 0.75 + span / 2;
+      // draw filled arc
+      if (value >= 0) {
+        const frac = Math.min(value, 100) / 100;
+        fgCtx.strokeStyle = "#10c0a3";
+        fgCtx.lineWidth = 18;
+        fgCtx.beginPath();
+        fgCtx.arc(0, 0, radius, mid, mid + (span / 2) * frac, false);
+        fgCtx.stroke();
+      } else {
+        const frac = Math.min(-value, 100) / 100;
+        fgCtx.strokeStyle = "#f08c3c";
+        fgCtx.lineWidth = 18;
+        fgCtx.beginPath();
+        fgCtx.arc(0, 0, radius, mid, mid - (span / 2) * frac, true);
+        fgCtx.stroke();
+      }
+      fgCtx.restore();
+      document.getElementById('power-value').innerText = `${value.toFixed(0)}%`;
+    }
+
+    drawBackground();
+    drawPowerDial(0);
+
+    // WebSocket telemetry
+    let ws = new WebSocket(`ws://${location.host}/ws/telemetry`);
+    ws.onmessage = (ev) => {
+      const t = JSON.parse(ev.data);
+      const power = t.power; // renamed from speed
+
+      // Power (gauge)
+      drawPowerDial(power);
+
+      // Gear
+      document.getElementById('gear-1').classList.toggle('active', t.gear === '1st');
+      document.getElementById('gear-2').classList.toggle('active', t.gear === '2nd');
+      document.getElementById('gear-3').classList.toggle('active', t.gear === '3rd');
+
+      // Brake bar: full brake = 100%
+      document.getElementById('brake-fill').style.width = t.brake ? '100%' : '0%';
+      document.getElementById('brake-text').innerText = t.brake;
+
+      // Lights: compute front/back from lights + brake logic
+      // lights boolean + t.brake determines code: frontend only shows bulbs
+      const lightsEnabled = t.lights;
+      // if braking and lightsEnabled => front+back on; if braking and !lightsEnabled => back on; if not braking and lightsEnabled => both on; else off
+      const frontOn = lightsEnabled;
+      const backOn = t.brake ? true : lightsEnabled;
+      document.getElementById('light-front').classList.toggle('on', frontOn);
+      document.getElementById('light-back').classList.toggle('on', backOn);
+      document.getElementById('lights-text').innerText = lightsEnabled ? 'ON' : 'OFF';
+
+      // Raw command
+      document.getElementById('raw').innerText = `throttle=${t.raw_right_trigger} power=${t.power} angle=${t.angle}`;
+
+      // Throttle / angle
+      document.getElementById('throttle').innerText = t.raw_right_trigger;
+      document.getElementById('angle').innerText = t.angle;
+
+      // Buttons (A,B,X,Y layout)
+      document.getElementById('btn-A').classList.toggle('active', !!t.buttons.A);
+      document.getElementById('btn-B').classList.toggle('active', !!t.buttons.B);
+      document.getElementById('btn-X').classList.toggle('active', !!t.buttons.X);
+      document.getElementById('btn-Y').classList.toggle('active', !!t.buttons.Y);
+      document.getElementById('btn-LB').classList.toggle('active', !!t.buttons.LB);
+      document.getElementById('btn-RB').classList.toggle('active', !!t.buttons.RB);
+
+      // Triggers
+      const gasPercent = Math.max(0, t.buttons ? 0 : 0); // placeholder if needed
+      document.getElementById('gas-fill').style.width = `${Math.max(0, t.raw_right_trigger > 0 ? t.raw_right_trigger : 0)}%`;
+      document.getElementById('lt-fill').style.width = `${Math.max(0, t.raw_left_trigger > 0 ? t.raw_left_trigger : 0)}%`;
+    };
+    ws.onopen = () => console.log("Telemetry connected");
+    ws.onclose = () => console.log("Telemetry disconnected");
+  </script>
+</body>
+
+</html>

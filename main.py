@@ -4,8 +4,10 @@ import asyncio
 import time
 import logging
 from enum import Enum, auto
+import json
 
-SIMULATE_HUB = False  # when True: skip real hub connection, just simulate
+SIMULATE_HUB = True  # when True: skip real hub connection, just simulate
+ENABLE_RICH_LOG = True  # toggle terminal rich-style live UI
 
 # hide pygame support prompt
 os.environ['PYGAME_HIDE_SUPPORT_PROMPT'] = '1'
@@ -18,6 +20,10 @@ from bleak import BleakScanner, BleakClient
 from rich.live import Live
 from rich.table import Table
 from rich.panel import Panel
+from fastapi import FastAPI, WebSocket
+from fastapi.staticfiles import StaticFiles
+import uvicorn
+from uvicorn import Config, Server
 
 # ---------- LOGGING ----------
 logger = logging.getLogger("movehub")
@@ -28,18 +34,43 @@ handler.setFormatter(formatter)
 logger.addHandler(handler)
 
 
+# ---------- Telemetry backend ----------
+app = FastAPI()
+app.mount("/static", StaticFiles(directory="static"), name="static")
+clients: set[WebSocket] = set()
+
+@app.websocket("/ws/telemetry")
+async def telemetry_ws(websocket: WebSocket):
+    await websocket.accept()
+    clients.add(websocket)
+    try:
+        while True:
+            await asyncio.sleep(1)  # keep connection open; telemetry pushed externally
+    except Exception:
+        pass
+    finally:
+        clients.discard(websocket)
+
+async def broadcast_telemetry(data: dict):
+    payload = json.dumps(data)
+    stale = []
+    for ws in list(clients):
+        try:
+            await ws.send_text(payload)
+        except Exception:
+            stale.append(ws)
+    for s in stale:
+        clients.discard(s)
+
+
 # ---------- HUB CLASS ----------
 class TechnicMoveHub:
     SERVICE_UUID = "00001623-1212-EFDE-1623-785FEABCD123"
     CHAR_UUID = "00001624-1212-EFDE-1623-785FEABCD123"
 
-    SC_BUFFER_NO_FEEDBACK = 0x00
-    MOTOR_MODE_POWER = 0x00
-    END_STATE_BRAKE = 0x01
-    ID_LED = 0x00
-    IO_TYPE_RGB_LED = 0x00
-    LED_MODE_COLOR = 0x00
-    LED_MODE_RGB = 0x01
+    LIGHTS_OFF_OFF = 0b100  # legacy, not used directly
+    LIGHTS_OFF_ON = 0b101
+    LIGHTS_ON_ON = 0b000
 
     def __init__(self, device_name: str):
         self.device_name = device_name
@@ -52,19 +83,16 @@ class TechnicMoveHub:
             logger.info(f"[SIMULATION] Skipping scan/connect for '{self.device_name}'.")
             self._start_time = time.time()
             return True
-
         logger.info("Searching for Technic Move Hub...")
         try:
             devices = await BleakScanner.discover(timeout=5)
         except Exception as e:
             logger.error(f"BLE scan failed: {e}")
             return False
-
         target = next((d for d in devices if d.name and self.device_name in d.name), None)
         if not target:
             logger.warning(f"Device '{self.device_name}' not found.")
             return False
-
         logger.info(f"Found device '{target.name}' [{target.address}] — connecting...")
         self.client = BleakClient(address_or_ble_device=target, pair=True)
         try:
@@ -72,11 +100,9 @@ class TechnicMoveHub:
         except Exception as e:
             logger.error(f"Connection error: {e}")
             return False
-
         if not self.client.is_connected:
             logger.error("Failed to connect: client reports disconnected.")
             return False
-
         logger.info("Connected. Attempting to pair (protection level 2)...")
         try:
             paired = await self.client.pair(protection_level=2)
@@ -85,7 +111,6 @@ class TechnicMoveHub:
         except Exception as e:
             logger.error(f"Pairing exception: {e}")
             return False
-
         self._start_time = time.time()
         logger.info("Hub ready.")
         return True
@@ -96,11 +121,9 @@ class TechnicMoveHub:
         if self.simulate:
             logger.debug(f"[SIMULATED → hub] +{elapsed_ms:7.2f}ms | {hex_repr}")
             return
-
         if not self.client or not self.client.is_connected:
             logger.warning("Attempted to send data with no active BLE connection.")
             return
-
         try:
             await self.client.write_gatt_char(self.CHAR_UUID, data)
             logger.debug(f"[→ hub] +{elapsed_ms:7.2f}ms | {hex_repr}")
@@ -116,7 +139,6 @@ class TechnicMoveHub:
             logger.info("Disconnected from hub.")
 
     async def calibrate_steering(self):
-        # steering calibration sequence
         await self.send_data(bytes.fromhex("0d008136115100030000001000"))
         await asyncio.sleep(0.1)
         await self.send_data(bytes.fromhex("0d008136115100030000000800"))
@@ -134,7 +156,7 @@ class TechnicMoveHub:
 
 # ---------- Helpers ----------
 DEADZONE_STICK = 12
-DEADZONE_TRIGGER = 6
+DEADZONE_TRIGGER = 10
 
 def apply_deadzone(value, deadzone):
     return 0 if abs(value) < deadzone else value
@@ -157,17 +179,11 @@ def get_triggers(joystick):
     return left, right
 
 def compute_light_code(is_braking: bool, lights_enabled: bool) -> int:
-    # mapping:
-    # Front+back on: 0x00
-    # Front+back on braking: 0x01
-    # All off: 0x04
-    # Front off, back on braking: 0x05
     if is_braking:
         return 0x01 if lights_enabled else 0x05
     else:
         return 0x00 if lights_enabled else 0x04
 
-# Buttons mapping
 BUTTON_MAPPING = {
     "A": lambda j: j.get_button(0),  # full brake
     "B": lambda j: j.get_button(1),
@@ -222,12 +238,11 @@ def build_status_table(raw, command, connected, simulate, lights_enabled, brake,
     table.add_row("Current Gear", gear_name(gear))
     conn = "SIMULATED" if simulate else ("Connected" if connected else "Disconnected")
     table.add_row("Hub Status", conn)
-
     return table
 
 
 # ---------- Main logic ----------
-async def main():
+async def controller_loop():
     device_name = "Technic Move"
     hub = TechnicMoveHub(device_name)
 
@@ -252,12 +267,10 @@ async def main():
 
     await hub.calibrate_steering()
 
-    # initial state
     lights_enabled = True
     toggle_old = False
     gear_idx = 0
     current_gear = GEAR_ORDER[gear_idx]
-
     throttle_old = 0
     steering_old = 0
     lights_old_code = compute_light_code(False, lights_enabled)
@@ -273,126 +286,162 @@ async def main():
     }
     command = {"speed": 0, "angle": 0, "raw_throttle": 0}
 
-    with Live(refresh_per_second=10, transient=False) as live:
-        try:
-            while True:
-                pygame.event.pump()
+    live_ctx = Live(refresh_per_second=10, transient=False) if ENABLE_RICH_LOG else None
+    if ENABLE_RICH_LOG:
+        live_ctx.__enter__()
 
-                left_x, left_y = get_left_joystick(joystick)
-                right_x, right_y = get_right_joystick(joystick)
-                left_trigger, right_trigger = get_triggers(joystick)
-                button_states = {name: func(joystick) for name, func in BUTTON_MAPPING.items()}
+    try:
+        while True:
+            pygame.event.pump()
 
-                # gear shifting: LB = down, RB = up
-                if button_states["LB"] and not raw["buttons"].get("LB", 0):
-                    gear_idx = max(0, gear_idx - 1)
-                    current_gear = GEAR_ORDER[gear_idx]
-                    if current_gear == Gear.FIRST:
-                        joystick.rumble(0.1, 0.1, 150)
-                    elif current_gear == Gear.SECOND:
-                        joystick.rumble(0.2, 0.2, 200)
-                    elif current_gear == Gear.THIRD:
-                        joystick.rumble(0.4, 0.4, 250)
-                    logger.info(f"Gear changed to {gear_name(current_gear)}")
-                if button_states["RB"] and not raw["buttons"].get("RB", 0):
-                    gear_idx = min(len(GEAR_ORDER) - 1, gear_idx + 1)
-                    current_gear = GEAR_ORDER[gear_idx]
-                    if current_gear == Gear.FIRST:
-                        joystick.rumble(0.1, 0.1, 150)
-                    elif current_gear == Gear.SECOND:
-                        joystick.rumble(0.2, 0.2, 200)
-                    elif current_gear == Gear.THIRD:
-                        joystick.rumble(0.4, 0.4, 250)
-                    logger.info(f"Gear changed to {gear_name(current_gear)}")
+            left_x, left_y = get_left_joystick(joystick)
+            right_x, right_y = get_right_joystick(joystick)
+            left_trigger, right_trigger = get_triggers(joystick)
+            button_states = {name: func(joystick) for name, func in BUTTON_MAPPING.items()}
 
-                # throttle/brake/back logic:
-                full_brake = False
-                raw_throttle = 0
+            # gear shifting
+            if button_states["LB"] and not raw["buttons"].get("LB", 0):
+                gear_idx = max(0, gear_idx - 1)
+                current_gear = GEAR_ORDER[gear_idx]
+                if current_gear == Gear.FIRST:
+                    joystick.rumble(0.1, 0.1, 150)
+                elif current_gear == Gear.SECOND:
+                    joystick.rumble(0.2, 0.2, 200)
+                elif current_gear == Gear.THIRD:
+                    joystick.rumble(0.4, 0.4, 250)
+                logger.info(f"Gear changed to {gear_name(current_gear)}")
+            if button_states["RB"] and not raw["buttons"].get("RB", 0):
+                gear_idx = min(len(GEAR_ORDER) - 1, gear_idx + 1)
+                current_gear = GEAR_ORDER[gear_idx]
+                if current_gear == Gear.FIRST:
+                    joystick.rumble(0.1, 0.1, 150)
+                elif current_gear == Gear.SECOND:
+                    joystick.rumble(0.2, 0.2, 200)
+                elif current_gear == Gear.THIRD:
+                    joystick.rumble(0.4, 0.4, 250)
+                logger.info(f"Gear changed to {gear_name(current_gear)}")
 
-                if right_trigger > 0:
-                    if left_trigger > 80 or button_states["A"]:
-                        full_brake = True
-                        raw_throttle = 0
-                    else:
-                        raw_throttle = right_trigger - left_trigger
+            # throttle/brake/back logic
+            full_brake = False
+            raw_throttle = 0
+
+            if right_trigger > 0:
+                if left_trigger > 80 or button_states["A"]:
+                    full_brake = True
+                    raw_throttle = 0
                 else:
-                    if button_states["A"]:
-                        full_brake = True
-                        raw_throttle = 0
-                    else:
-                        raw_throttle = -int(left_trigger * 0.4)
-
-                # apply gear scaling (full brake overrides)
-                scale = GEAR_THROTTLE_SCALE.get(current_gear, 0.0)
-                if full_brake:
-                    adjusted_speed = 0
+                    raw_throttle = right_trigger - left_trigger
+            else:
+                if button_states["A"]:
+                    full_brake = True
+                    raw_throttle = 0
                 else:
-                    adjusted_speed = int(raw_throttle * scale)
+                    raw_throttle = -int(left_trigger * 0.4)
 
-                steering = left_x
+            scale = GEAR_THROTTLE_SCALE.get(current_gear, 0.0)
+            if full_brake:
+                adjusted_speed = 0
+            else:
+                adjusted_speed = int(raw_throttle * scale)
 
-                # lights toggle on Y press
-                toggle = button_states["Y"]
-                if toggle and not toggle_old:
-                    lights_enabled = not lights_enabled
-                    logger.info(f"Lights {'ON' if lights_enabled else 'OFF'}")
-                toggle_old = toggle
+            steering = left_x
 
-                brake_active = full_brake
+            # lights toggle
+            toggle = button_states["Y"]
+            if toggle and not toggle_old:
+                lights_enabled = not lights_enabled
+                logger.info(f"Lights {'ON' if lights_enabled else 'OFF'}")
+            toggle_old = toggle
 
-                # compute light code based on braking and lights_enabled
-                lights_code = compute_light_code(brake_active, lights_enabled)
+            brake_active = full_brake
+            lights_code = compute_light_code(brake_active, lights_enabled)
 
-                # drive command logic
-                if brake_active and not was_brake:
-                    await hub.drive(0, steering, lights_code)
-                    throttle_old = 0
+            # drive logic
+            if brake_active and not was_brake:
+                await hub.drive(0, steering, lights_code)
+                throttle_old = 0
+            if not brake_active and was_brake:
+                await hub.drive(adjusted_speed, steering, lights_code)
+            should_drive = (steering != steering_old or adjusted_speed != throttle_old or lights_code != lights_old_code)
+            if should_drive:
+                await hub.drive(adjusted_speed, steering, lights_code)
 
-                if not brake_active and was_brake:
-                    await hub.drive(adjusted_speed, steering, lights_code)
+            throttle_old = adjusted_speed
+            steering_old = steering
+            lights_old_code = lights_code
+            was_brake = brake_active
 
-                should_drive = (
-                    (steering != steering_old or adjusted_speed != throttle_old or lights_code != lights_old_code)
-                )
-                if should_drive:
-                    await hub.drive(adjusted_speed, steering, lights_code)
+            # update raw/command
+            raw["left"] = (left_x, left_y)
+            raw["right"] = (right_x, right_y)
+            raw["triggers"] = (left_trigger, right_trigger)
+            raw["buttons"] = {k: int(v) for k, v in button_states.items()}
+            command["raw_throttle"] = raw_throttle
+            command["speed"] = adjusted_speed
+            command["angle"] = steering
 
-                throttle_old = adjusted_speed
-                steering_old = steering
-                lights_old_code = lights_code
-                was_brake = brake_active
+            # build table
+            table = build_status_table(
+                raw=raw,
+                command=command,
+                connected=bool(hub.client and getattr(hub.client, "is_connected", False)),
+                simulate=hub.simulate,
+                lights_enabled=lights_enabled,
+                brake=brake_active,
+                gear=current_gear,
+                lights_code=lights_code,
+            )
+            if ENABLE_RICH_LOG:
+                live_ctx.update(Panel(table, title="Gamepad → Vehicle", border_style="green"))
+            else:
+                logger.info(f"Gear: {gear_name(current_gear)} | Speed: {adjusted_speed} | Brake: {brake_active} | Lights: {'ON' if lights_enabled else 'OFF'}")
 
-                # update raw and command for UI
-                raw["left"] = (left_x, left_y)
-                raw["right"] = (right_x, right_y)
-                raw["triggers"] = (left_trigger, right_trigger)
-                raw["buttons"] = {k: int(v) for k, v in button_states.items()}
+            # telemetry broadcast (fire-and-forget)
+            telemetry = {
+                "power": adjusted_speed,
+                "gear": gear_name(current_gear),
+                "raw_left_trigger": left_trigger,
+                "raw_right_trigger": right_trigger,
+                "angle": steering,
+                "brake": brake_active,
+                "lights": lights_enabled,
+                "buttons": raw["buttons"],
+                "timestamp": time.time(),
+            }
 
-                command["raw_throttle"] = raw_throttle
-                command["speed"] = adjusted_speed
-                command["angle"] = steering
+            asyncio.create_task(broadcast_telemetry(telemetry))
 
-                # build and refresh status table
-                table = build_status_table(
-                    raw=raw,
-                    command=command,
-                    connected=bool(hub.client and getattr(hub.client, "is_connected", False)),
-                    simulate=hub.simulate,
-                    lights_enabled=lights_enabled,
-                    brake=brake_active,
-                    gear=current_gear,
-                    lights_code=lights_code,
-                )
-                live.update(Panel(table, title="Gamepad → Vehicle", border_style="green"))
+            await asyncio.sleep(polling_interval)
 
-                await asyncio.sleep(polling_interval)
+    except asyncio.CancelledError:
+        pass
+    finally:
+        await hub.disconnect()
+        pygame.quit()
+        logger.info("Finished.")
+        if ENABLE_RICH_LOG:
+            live_ctx.__exit__(None, None, None)
 
-        except KeyboardInterrupt:
-            logger.info("Received KeyboardInterrupt, shutting down.")
-        finally:
-            await hub.disconnect()
-            pygame.quit()
-            logger.info("Finished.")
+
+async def main():
+    # prepare hub/controller task
+    controller = asyncio.create_task(controller_loop())
+
+    # configure uvicorn server without blocking
+    config = Config(
+        app=app,
+        host="0.0.0.0",
+        port=8000,
+        log_level="warning",
+        loop="asyncio",
+        lifespan="off"  # optional: disable lifespan if not needed
+    )
+    server = Server(config)
+
+    # run both concurrently
+    web = asyncio.create_task(server.serve())
+
+    await asyncio.gather(controller, web)
 
 
 if __name__ == "__main__":
